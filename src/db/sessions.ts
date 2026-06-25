@@ -155,11 +155,11 @@ export function createPendingApproval(
       `INSERT OR IGNORE INTO pending_approvals
          (approval_id, session_id, request_id, action, payload, created_at,
           agent_group_id, channel_type, platform_id, platform_message_id, expires_at, status,
-          title, options_json, approver_user_id)
+          title, options_json, approver_user_id, notified_approver_ids)
        VALUES
          (@approval_id, @session_id, @request_id, @action, @payload, @created_at,
           @agent_group_id, @channel_type, @platform_id, @platform_message_id, @expires_at, @status,
-          @title, @options_json, @approver_user_id)`,
+          @title, @options_json, @approver_user_id, @notified_approver_ids)`,
     )
     .run({
       session_id: null,
@@ -170,6 +170,7 @@ export function createPendingApproval(
       expires_at: null,
       status: 'pending',
       approver_user_id: null,
+      notified_approver_ids: null,
       ...pa,
     });
   return result.changes > 0;
@@ -183,6 +184,18 @@ export function getPendingApproval(approvalId: string): PendingApproval | undefi
 
 export function updatePendingApprovalStatus(approvalId: string, status: PendingApproval['status']): void {
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
+}
+
+export function updateApprovalNotifiedApprovers(approvalId: string, notifiedIds: string[]): void {
+  getDb()
+    .prepare('UPDATE pending_approvals SET notified_approver_ids = ? WHERE approval_id = ?')
+    .run(JSON.stringify(notifiedIds), approvalId);
+}
+
+export function updateApprovalApprover(approvalId: string, approverUserId: string, notifiedIds: string[]): void {
+  getDb()
+    .prepare('UPDATE pending_approvals SET approver_user_id = ?, notified_approver_ids = ? WHERE approval_id = ?')
+    .run(approverUserId, JSON.stringify(notifiedIds), approvalId);
 }
 
 export function deletePendingApproval(approvalId: string): void {

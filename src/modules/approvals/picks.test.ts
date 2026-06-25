@@ -143,4 +143,33 @@ describe('pickApprovalDelivery', () => {
     seedUser('telegram:111', 'telegram');
     expect(await pickApprovalDelivery(['telegram:111'], 'telegram')).toBeNull();
   });
+
+  it('skips excluded user IDs', async () => {
+    await mountMockAdapter('telegram');
+    seedUser('telegram:111', 'telegram');
+    seedUser('telegram:222', 'telegram');
+
+    // telegram:111 is already notified — should fall through to telegram:222
+    const result = await pickApprovalDelivery(['telegram:111', 'telegram:222'], 'telegram', ['telegram:111']);
+    expect(result?.userId).toBe('telegram:222');
+  });
+
+  it('returns null when all approvers are excluded', async () => {
+    await mountMockAdapter('telegram');
+    seedUser('telegram:111', 'telegram');
+
+    const result = await pickApprovalDelivery(['telegram:111'], 'telegram', ['telegram:111']);
+    expect(result).toBeNull();
+  });
+
+  it('exclude does not affect same-channel tie-break when candidate is not excluded', async () => {
+    await mountMockAdapter('telegram');
+    await mountMockAdapter('discord', async (h) => `dm-${h}`);
+    seedUser('telegram:111', 'telegram');
+    seedUser('discord:222', 'discord');
+
+    // telegram:111 excluded; discord:222 should still be found despite origin being 'discord'
+    const result = await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord', ['telegram:111']);
+    expect(result?.userId).toBe('discord:222');
+  });
 });
