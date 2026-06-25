@@ -23,13 +23,18 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, getSession } from '../../db/sessions.js';
+import {
+  createPendingApproval,
+  getSession,
+  updateApprovalApprover,
+  updateApprovalNotifiedApprovers,
+} from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, PendingApproval, Session } from '../../types.js';
-import { getAdminsOfAgentGroup, getGlobalAdmins, getOwners } from '../permissions/db/user-roles.js';
+import { getAdminsOfAgentGroup, getGlobalAdmins, getOwners, hasAdminPrivilege } from '../permissions/db/user-roles.js';
 import { ensureUserDm } from '../permissions/user-dm.js';
 
 /** Two-button approval UI — the only options the primitive supports today. */
@@ -143,19 +148,25 @@ export function pickApprover(agentGroupId: string | null): string[] {
  * Tie-break: prefer approvers reachable on the same channel kind as the
  * origin; else first in list. Resolution uses ensureUserDm, which may
  * trigger a platform openDM call on cache miss.
+ *
+ * @param exclude - User IDs to skip (already notified). Defaults to [].
  */
 export async function pickApprovalDelivery(
   approvers: string[],
   originChannelType: string,
+  exclude: string[] = [],
 ): Promise<{ userId: string; messagingGroup: MessagingGroup } | null> {
+  const excludeSet = new Set(exclude);
+  const candidates = approvers.filter((id) => !excludeSet.has(id));
+
   if (originChannelType) {
-    for (const userId of approvers) {
+    for (const userId of candidates) {
       if (channelTypeOf(userId) !== originChannelType) continue;
       const mg = await ensureUserDm(userId);
       if (mg) return { userId, messagingGroup: mg };
     }
   }
-  for (const userId of approvers) {
+  for (const userId of candidates) {
     const mg = await ensureUserDm(userId);
     if (mg) return { userId, messagingGroup: mg };
   }
@@ -238,6 +249,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     title,
     options_json: JSON.stringify(normalizedOptions),
     approver_user_id: approverUserId ?? null,
+    notified_approver_ids: JSON.stringify([target.userId]),
   });
 
   const adapter = getDeliveryAdapter();
@@ -264,4 +276,117 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+}
+
+// ── Reassign API ──
+
+export interface ReassignApprovalOptions {
+  approvalId: string;
+  /** When provided, deliver to this specific user instead of auto-picking the next eligible admin. */
+  toUserId?: string;
+  /** The agent group ID of the requesting session (used for logging only). */
+  agentGroupId?: string | null;
+}
+
+export interface ReassignApprovalResult {
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Re-deliver a pending approval card to the next available admin (or a
+ * specific admin when `toUserId` is provided), skipping anyone who has
+ * already been notified.
+ *
+ * Called from:
+ *   - `ncl approvals reassign --id <id> [--to <user-id>]` (CLI path)
+ *   - The `reassign_approval` delivery-action handler (MCP tool path)
+ */
+export async function reassignApproval(opts: ReassignApprovalOptions): Promise<ReassignApprovalResult> {
+  const { approvalId, toUserId, agentGroupId } = opts;
+
+  const { getPendingApproval } = await import('../../db/sessions.js');
+  const approval = getPendingApproval(approvalId);
+  if (!approval) {
+    return { ok: false, message: `Approval not found: ${approvalId}` };
+  }
+  if (approval.status !== 'pending') {
+    return { ok: false, message: `Approval ${approvalId} is already ${approval.status}` };
+  }
+
+  const alreadyNotified: string[] = approval.notified_approver_ids
+    ? (JSON.parse(approval.notified_approver_ids) as string[])
+    : [];
+
+  // Determine target admin
+  let targetUserId: string;
+  let messagingGroup: MessagingGroup;
+
+  if (toUserId) {
+    // Explicit target — validate it's a real admin
+    const targetAgentGroupId = approval.agent_group_id ?? null;
+    const isEligible =
+      hasAdminPrivilege(toUserId, targetAgentGroupId ?? '') ||
+      getGlobalAdmins().some((r) => r.user_id === toUserId) ||
+      getOwners().some((r) => r.user_id === toUserId);
+    if (!isEligible) {
+      return { ok: false, message: `User ${toUserId} does not have admin privilege for this approval.` };
+    }
+    const dm = await ensureUserDm(toUserId);
+    if (!dm) {
+      return { ok: false, message: `No DM channel found for ${toUserId}.` };
+    }
+    targetUserId = toUserId;
+    messagingGroup = dm;
+  } else {
+    // Auto-pick: prefer same channel kind as origin (if known), skip already notified
+    const approvers = pickApprover(approval.agent_group_id ?? null);
+    if (approvers.length === 0) {
+      return { ok: false, message: 'No owner or admin configured to approve.' };
+    }
+
+    const originChannelType = approval.channel_type ?? '';
+    const target = await pickApprovalDelivery(approvers, originChannelType, alreadyNotified);
+    if (!target) {
+      return {
+        ok: false,
+        message: `No reachable admin remaining. Already notified: ${alreadyNotified.join(', ') || '(none)'}`,
+      };
+    }
+    targetUserId = target.userId;
+    messagingGroup = target.messagingGroup;
+  }
+
+  // Deliver the card
+  const options: RawOption[] = JSON.parse(approval.options_json);
+  const adapter = getDeliveryAdapter();
+  if (!adapter) {
+    return { ok: false, message: 'No delivery adapter available.' };
+  }
+
+  try {
+    await adapter.deliver(
+      messagingGroup.channel_type,
+      messagingGroup.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: approvalId,
+        title: approval.title,
+        question: `[Reassigned] ${approval.title}`,
+        options,
+      }),
+    );
+  } catch (err) {
+    log.error('Failed to deliver reassigned approval card', { approvalId, targetUserId, err });
+    return { ok: false, message: `Could not deliver approval card to ${targetUserId}.` };
+  }
+
+  // Update the row: new approver + extend notified list (deduped)
+  const updatedNotified = [...new Set([...alreadyNotified, targetUserId])];
+  updateApprovalApprover(approvalId, targetUserId, updatedNotified);
+
+  log.info('Approval reassigned', { approvalId, targetUserId, agentGroupId });
+  return { ok: true, message: `Approval ${approvalId} reassigned to ${targetUserId}.` };
 }

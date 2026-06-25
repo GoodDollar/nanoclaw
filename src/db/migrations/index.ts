@@ -17,6 +17,7 @@ import { migration016 } from './016-messaging-group-instance.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
+import { migration019 } from './019-approvals-notified-approvers.js';
 
 export interface Migration {
   version: number;
@@ -41,6 +42,7 @@ export const migrations: Migration[] = [
   migration017,
   moduleApprovalsTitleOptions,
   migration018,
+  migration019,
   migration008,
   migration009,
   migration010,

@@ -206,6 +206,8 @@ export interface PendingApproval {
   options_json: string;
   /** When set, only this exact user may resolve the approval. */
   approver_user_id: string | null;
+  /** JSON array of user IDs that have already been sent a card for this approval. */
+  notified_approver_ids: string | null;
 }
 
 // ── Agent destinations (central DB) ──

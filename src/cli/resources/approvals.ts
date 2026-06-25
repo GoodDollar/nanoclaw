@@ -1,4 +1,5 @@
 import { registerResource } from '../crud.js';
+import { reassignApproval } from '../../modules/approvals/index.js';
 
 registerResource({
   name: 'approval',
@@ -48,6 +49,34 @@ registerResource({
     },
     { name: 'title', type: 'string', description: 'Card title shown to the admin.' },
     { name: 'options_json', type: 'json', description: 'Card button options as JSON array.' },
+    {
+      name: 'notified_approver_ids',
+      type: 'json',
+      description: 'JSON array of user IDs that have already been sent a card for this approval.',
+    },
   ],
   operations: { list: 'open', get: 'open' },
+  customOperations: {
+    reassign: {
+      access: 'open',
+      description:
+        'Re-deliver a pending approval card to the next available admin (skipping already-notified ones), or to a specific admin with --to.',
+      args: [
+        { name: 'id', type: 'string', description: 'Approval ID to reassign.', required: true },
+        {
+          name: 'to',
+          type: 'string',
+          description: 'Specific user ID to reassign to (optional; auto-picks next admin if omitted).',
+        },
+      ],
+      async handler(args) {
+        const approvalId = args.id as string | undefined;
+        if (!approvalId) throw new Error('--id is required');
+        const toUserId = args.to as string | undefined;
+        const result = await reassignApproval({ approvalId, toUserId });
+        if (!result.ok) throw new Error(result.message);
+        return { message: result.message };
+      },
+    },
+  },
 });
